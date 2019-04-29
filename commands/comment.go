@@ -15,10 +15,11 @@ import (
 
 var (
   cmdComment = &Command{
-    Run: listComments,
+    Run: listRepositoryComments,
     Usage: `
-comment --issue=<issue> [-@ <USER>] [-f <FORMAT>] [-d <DATE>] [-o <SORT_KEY> [-^]]
-comment create --issue=<issue> [-oc] [-m <MESSAGE>|-F <FILE>]
+comment [-@ <USER>] [-f <FORMAT>] [-d <DATE>] [-o <SORT_KEY> [-^]]
+comment list <issue> [-@ <USER>] [-f <FORMAT>] [-d <DATE>] [-o <SORT_KEY> [-^]]
+comment create <issue> [-oc] [-m <MESSAGE>|-F <FILE>]
 `,
     Long: `Manage GitHub comments for the current project.
 
@@ -91,6 +92,13 @@ With no arguments, show a list of comments associated with an issue.
 `,
   }
 
+  cmdListComment = &Command{
+    Key:   "list",
+    Run:   listComments,
+    Usage: "comment create [issue] [-o] [-m <MESSAGE>|-F <FILE>]",
+    Long:  "Add a comment to the specified issue.",
+  }
+
   cmdCreateComment = &Command{
     Key:   "create",
     Run:   createComment,
@@ -98,7 +106,6 @@ With no arguments, show a list of comments associated with an issue.
     Long:  "Add a comment to the specified issue.",
   }
 
-  flagIssueNumber,
   flagCommentFormat,
   flagCommentMessage,
   flagCommentCreator,
@@ -112,28 +119,33 @@ With no arguments, show a list of comments associated with an issue.
 )
 
 func init() {
-  cmdCreateComment.Flag.StringVarP(&flagIssueNumber, "issue", "i", "", "ISSUE")
   cmdCreateComment.Flag.StringVarP(&flagCommentMessage, "message", "m", "", "MESSAGE")
   cmdCreateComment.Flag.StringVarP(&flagCommentFile, "file", "F", "", "FILE")
   cmdCreateComment.Flag.BoolVarP(&flagCommentBrowse, "browse", "o", false, "BROWSE")
   cmdCreateComment.Flag.BoolVarP(&flagCommentCopy, "copy", "c", false, "COPY")
   cmdCreateComment.Flag.BoolVarP(&flagCommentEdit, "edit", "e", false, "EDIT")
 
-  cmdComment.Flag.StringVarP(&flagIssueNumber, "issue", "i", "", "ISSUE")
+  cmdListComment.Flag.StringVarP(&flagCommentFormat, "format", "f", "%>(12)%i %b", "FORMAT")
+  cmdListComment.Flag.StringVarP(&flagCommentCreator, "creator", "c", "", "CREATOR")
+  cmdListComment.Flag.StringVarP(&flagCommentMentioned, "mentioned", "@", "", "USER")
+  cmdListComment.Flag.StringVarP(&flagCommentSince, "since", "d", "", "DATE")
+
   cmdComment.Flag.StringVarP(&flagCommentFormat, "format", "f", "%>(12)%i %b", "FORMAT")
   cmdComment.Flag.StringVarP(&flagCommentCreator, "creator", "c", "", "CREATOR")
   cmdComment.Flag.StringVarP(&flagCommentMentioned, "mentioned", "@", "", "USER")
   cmdComment.Flag.StringVarP(&flagCommentSince, "since", "d", "", "DATE")
 
+  cmdComment.Use(cmdListComment)
   cmdComment.Use(cmdCreateComment)
   CmdRunner.Use(cmdComment)
 }
 
 func getIssueNumber(cmd *Command) int {
-  if !cmd.FlagPassed("issue") {
+  issueNumberArg := cmd.Arg(0)
+  if issueNumberArg == "" {
     utils.Check(fmt.Errorf("Aborting because issue number was not provided"))
   }
-  issueNumber, err := strconv.Atoi(flagIssueNumber)
+  issueNumber, err := strconv.Atoi(issueNumberArg)
   if err != nil {
     utils.Check(fmt.Errorf("Aborting because issue number was not an integer"))
   }
@@ -141,7 +153,6 @@ func getIssueNumber(cmd *Command) int {
 }
 
 func listComments(cmd *Command, args *Args) {
-  issueNumber := getIssueNumber(cmd)
   localRepo, err := github.LocalRepo()
   utils.Check(err)
 
@@ -172,7 +183,58 @@ func listComments(cmd *Command, args *Args) {
       }
     }
 
+    issueNumber := getIssueNumber(cmd)
     comments, err := gh.FetchIssueComments(project, issueNumber, filters)
+    utils.Check(err)
+
+    maxNumWidth := 0
+    for _, comment := range comments {
+      if numWidth := len(strconv.Itoa(comment.Id)); numWidth > maxNumWidth {
+        maxNumWidth = numWidth
+      }
+    }
+
+    colorize := ui.IsTerminal(os.Stdout)
+    for _, comment := range comments {
+      ui.Printf(formatComment(comment, flagCommentFormat, colorize))
+    }
+  }
+
+  args.NoForward()
+}
+
+func listRepositoryComments(cmd *Command, args *Args) {
+  localRepo, err := github.LocalRepo()
+  utils.Check(err)
+
+  project, err := localRepo.MainProject()
+  utils.Check(err)
+
+  gh := github.NewClient(project.Host)
+
+  if args.Noop {
+    ui.Printf("Would request list of comments for %s\n", project)
+  } else {
+    flagFilters := map[string]string{
+      "creator":   flagCommentCreator,
+      "mentioned": flagCommentMentioned,
+    }
+    filters := map[string]interface{}{}
+    for flag, filter := range flagFilters {
+      if cmd.FlagPassed(flag) {
+        filters[flag] = filter
+      }
+    }
+
+    if cmd.FlagPassed("since") {
+      if sinceTime, err := time.ParseInLocation("2006-01-02", flagCommentSince, time.Local); err == nil {
+        filters["since"] = sinceTime.Format(time.RFC3339)
+      } else {
+        filters["since"] = flagCommentSince
+      }
+    }
+
+    comments, err := gh.FetchRepositoryComments(project, filters)
     utils.Check(err)
 
     maxNumWidth := 0
